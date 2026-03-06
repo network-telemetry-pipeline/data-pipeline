@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: kafka-topics
+  namespace: argocd
+spec:
+  project: data-pipeline
+  source:
+    repoURL: https://github.com/network-telemetry-pipeline/data-pipeline.git
+    targetRevision: main
+    path: kafka
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kafka
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

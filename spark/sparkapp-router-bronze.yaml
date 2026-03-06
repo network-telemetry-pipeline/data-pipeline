@@ -1,0 +1,103 @@
+apiVersion: sparkoperator.k8s.io/v1beta2
+kind: SparkApplication
+metadata:
+  name: router-kafka-to-s3-bronze
+  namespace: spark
+spec:
+  type: Python
+  pythonVersion: "3"
+  mode: cluster
+
+  image: apache/spark:3.5.1
+  imagePullPolicy: IfNotPresent
+  mainApplicationFile: local:///opt/spark/app/app.py
+  sparkVersion: "3.5.1"
+
+  restartPolicy:
+    type: OnFailure
+    onFailureRetries: 3
+    onFailureRetryInterval: 10
+    onSubmissionFailureRetries: 5
+    onSubmissionFailureRetryInterval: 20
+
+  deps:
+    packages:
+      - org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1
+      - org.apache.hadoop:hadoop-aws:3.3.4
+      - com.amazonaws:aws-java-sdk-bundle:1.12.262
+
+  sparkConf:
+    # Kafka is internal service
+    spark.sql.streaming.forceDeleteTempCheckpointLocation: "true"
+
+    spark.jars.ivy: "/tmp/ivy"
+
+    # S3A to aiStor/MinIO (in-cluster HTTP endpoint)
+    spark.hadoop.fs.s3a.endpoint: "http://ml-lab-minio.primary-object-store.svc.cluster.local:9000"
+    spark.hadoop.fs.s3a.path.style.access: "true"
+    spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
+    spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    spark.hadoop.fs.s3a.access.key: "minio"
+    spark.hadoop.fs.s3a.secret.key: "minio123"
+
+    spark.hadoop.fs.s3a.aws.credentials.provider: "org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider"
+    spark.hadoop.fs.s3a.region: "us-east-1"
+    spark.hadoop.fs.s3a.signing-algorithm: "S3SignerType"
+
+  driver:
+    cores: 1
+    memory: "1g"
+    serviceAccount: spark
+    env:
+      - name: KAFKA_BOOTSTRAP
+        value: "my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+      - name: KAFKA_TOPIC
+        value: "router.metrics.raw"
+      - name: S3_BUCKET
+        value: "datalake"
+      - name: S3_PREFIX
+        value: "bronze/router_metrics"
+      - name: CHECKPOINT_PREFIX
+        value: "checkpoints/router_metrics_bronze_v2"
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: minio-creds
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: minio-creds
+            key: AWS_SECRET_ACCESS_KEY
+    volumeMounts:
+      - name: app-volume
+        mountPath: /opt/spark/app
+
+  executor:
+    instances: 1
+    cores: 1
+    memory: "1g"
+    env:
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: minio-creds
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: minio-creds
+            key: AWS_SECRET_ACCESS_KEY
+    volumeMounts:
+      - name: app-volume
+        mountPath: /opt/spark/app
+
+  volumes:
+    - name: app-volume
+      configMap:
+        name: router-kafka-to-s3-app
+        items:
+          - key: app.py
+            path: app.py

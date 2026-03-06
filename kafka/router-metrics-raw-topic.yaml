@@ -1,0 +1,16 @@
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaTopic
+metadata:
+  name: router.metrics.raw
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: my-cluster
+spec:
+  partitions: 3
+  replicas: 1
+  config:
+    retention.ms: "604800000"     # 7 days
+    retention.bytes: "-1"
+    cleanup.policy: delete
+    min.insync.replicas: "1"
+    compression.type: lz4

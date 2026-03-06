@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: router-kafka-to-s3-app
+  namespace: spark
+data:
+  app.py: |
+    import os
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col, from_json, to_timestamp, date_format
+    from pyspark.sql.types import StructType, StructField, StringType, DoubleType
+
+    import sys, time
+    print("APP.PY STARTED", flush=True)
+    sys.stdout.flush()
+    time.sleep(2)
+    print("APP.PY STILL RUNNING", flush=True)
+
+    KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP")
+    KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "router.metrics.raw")
+
+    S3_BUCKET = os.getenv("S3_BUCKET", "datalake")
+    S3_PREFIX = os.getenv("S3_PREFIX", "bronze/router_metrics")
+    CHECKPOINT_PREFIX = os.getenv("CHECKPOINT_PREFIX", "checkpoints/router_metrics_bronze_v2")
+
+    spark = SparkSession.builder.appName("router-kafka-to-s3-bronze").getOrCreate()
+
+    spark.sparkContext.setLogLevel("INFO")
+
+
+    schema = StructType([
+        StructField("timestamp", StringType(), True),
+        StructField("device_id", StringType(), True),
+        StructField("region", StringType(), True),
+        StructField("model", StringType(), True),
+        StructField("firmware_version", StringType(), True),
+        StructField("interface", StringType(), True),
+        StructField("cpu_usage_pct", DoubleType(), True),
+        StructField("memory_usage_pct", DoubleType(), True),
+        StructField("temperature_c", DoubleType(), True),
+        StructField("throughput_in_mbps", DoubleType(), True),
+        StructField("throughput_out_mbps", DoubleType(), True),
+        StructField("packet_loss_pct", DoubleType(), True),
+        StructField("bgp_state", StringType(), True),
+        StructField("health", StringType(), True),
+    ])
+
+    df = (spark.readStream
+        .format("kafka")
+        .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP)
+        .option("subscribe", KAFKA_TOPIC)
+        .option("startingOffsets", "earliest")
+        .load())
+
+    json_df = df.selectExpr("CAST(value AS STRING) AS json_str")
+    parsed = (json_df
+        .select(from_json(col("json_str"), schema).alias("r"))
+        .select("r.*"))
+
+    with_ts = (parsed
+        .withColumn("event_ts", to_timestamp(col("timestamp")))
+        .withColumn("dt", date_format(col("event_ts"), "yyyy-MM-dd"))
+        .withColumn("hour", date_format(col("event_ts"), "HH")))
+
+    out_path = f"s3a://{S3_BUCKET}/{S3_PREFIX}"
+    checkpoint_path = f"s3a://{S3_BUCKET}/{CHECKPOINT_PREFIX}"
+
+    (with_ts.writeStream
+      .format("parquet")
+      .option("path", out_path)
+      .option("checkpointLocation", checkpoint_path)
+      .partitionBy("dt", "hour")
+      .outputMode("append")
+      .start()
+      .awaitTermination())
+
+    print("STREAM STARTED")
+    print("Output:", out_path)
+    print("Checkpoint:", checkpoint_path)
+
+    # Print progress every 10s (you will SEE whether batches happen)
+    while True:
+        lp = q.lastProgress
+        if lp:
+            print("LAST_PROGRESS:", json.dumps(lp, indent=2))
+        else:
+            print("No progress yet. Status:", q.status)
+        time.sleep(10)
+
