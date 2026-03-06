@@ -1,8 +1,10 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: router-kafka-to-s3-app
+  name: router-bronze-app
   namespace: spark
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
 data:
   app.py: |
     import os
@@ -86,4 +88,3 @@ data:
         else:
             print("No progress yet. Status:", q.status)
         time.sleep(10)
-
