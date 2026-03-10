@@ -34,7 +34,7 @@ spec:
     spark.jars.ivy: "/tmp/ivy"
 
     # S3A to aiStor/MinIO (in-cluster HTTP endpoint)
-    spark.hadoop.fs.s3a.endpoint: "http://ml-lab-minio.primary-object-store.svc.cluster.local:9000"
+    spark.hadoop.fs.s3a.endpoint: "http://net-tel-minio.primary-object-store.svc.cluster.local:9000"
     spark.hadoop.fs.s3a.path.style.access: "true"
     spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
     spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
