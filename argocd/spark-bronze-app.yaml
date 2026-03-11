@@ -1,14 +1,14 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
-  name: spark-router-bronze
+  name: spark-bronze
   namespace: argocd
 spec:
   project: data-pipeline
   source:
     repoURL: https://github.com/network-telemetry-pipeline/data-pipeline.git
     targetRevision: main
-    path: spark
+    path: spark/bronze
   destination:
     server: https://kubernetes.default.svc
     namespace: spark
