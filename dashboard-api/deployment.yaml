@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
         - name: api
-          image: cilicivan96/network-telemetry-api:0.1
+          image: cilicivan96/network-telemetry-api:0.3
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
