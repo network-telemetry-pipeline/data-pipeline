@@ -22,21 +22,20 @@ spec:
     onSubmissionFailureRetries: 5
     onSubmissionFailureRetryInterval: 20
 
-  # If you use MinIO HTTP internally
   sparkConf:
     spark.jars.ivy: "/tmp/ivy"
 
-    # S3A to MinIO (HTTP)
+    spark.dynamicAllocation.enabled: "false"
+    spark.executor.instances: "1"
+
+    spark.sql.streaming.forceDeleteTempCheckpointLocation: "true"
+
     spark.hadoop.fs.s3a.endpoint: "http://net-tel-minio.primary-object-store.svc.cluster.local:9000"
     spark.hadoop.fs.s3a.path.style.access: "true"
     spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
     spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
     spark.hadoop.fs.s3a.aws.credentials.provider: "com.amazonaws.auth.EnvironmentVariableCredentialsProvider"
     spark.hadoop.fs.s3a.region: "us-east-1"
-
-    spark.sql.streaming.forceDeleteTempCheckpointLocation: "true"
-    spark.dynamicAllocation.enabled: "false"
-    spark.executor.instances: "1"
 
   deps:
     packages:
@@ -54,13 +53,11 @@ spec:
       - name: PYTHONPATH
         value: "/opt/spark/python-deps"
 
-      # Bronze path
       - name: BRONZE_PATH
         value: "s3a://datalake/bronze/router_metrics"
       - name: GOLD_CHECKPOINT
         value: "s3a://datalake/checkpoints/gold_to_postgres_v1"
 
-      # Postgres connection
       - name: PG_HOST
         value: "postgres.postgres.svc.cluster.local"
       - name: PG_PORT
@@ -72,7 +69,6 @@ spec:
       - name: PG_PASS
         value: "telemetrypass"
 
-      # MinIO creds (same secret you use elsewhere)
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:
@@ -86,12 +82,12 @@ spec:
 
     initContainers:
       - name: pip-install
-        image: python:3.11-slim
-        command: ["sh","-lc"]
+        image: python:3.10-slim
+        command: ["sh", "-lc"]
         args:
           - |
             set -e
-            pip install --no-cache-dir -t /opt/spark/python-deps psycopg2-binary==2.9.9
+            pip install --no-cache-dir -t /opt/spark/python-deps pg8000==1.31.2
             ls -lah /opt/spark/python-deps | head
         volumeMounts:
           - name: python-deps
@@ -107,10 +103,10 @@ spec:
     instances: 1
     cores: 1
     memory: "1g"
+
     env:
       - name: PYTHONUNBUFFERED
         value: "1"
-      # Only needed if you ever move DB writing to executors; safe to keep.
       - name: PYTHONPATH
         value: "/opt/spark/python-deps"
       - name: AWS_ACCESS_KEY_ID
@@ -123,6 +119,7 @@ spec:
           secretKeyRef:
             name: minio-creds
             key: AWS_SECRET_ACCESS_KEY
+
     volumeMounts:
       - name: app-volume
         mountPath: /opt/spark/app
@@ -136,5 +133,6 @@ spec:
         items:
           - key: app.py
             path: app.py
+
     - name: python-deps
       emptyDir: {}

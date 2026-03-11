@@ -8,26 +8,25 @@ metadata:
 data:
   app.py: |
     import os
-    import time
-    import json
-
-    import psycopg2
-    from psycopg2.extras import execute_values
+    import pg8000
 
     from pyspark.sql import SparkSession
     from pyspark.sql.functions import (
-      col, window, avg, expr, sum as Fsum, count as Fcount, lit
+        col, window, avg, expr, sum as Fsum, count as Fcount,
+        lit, when
     )
 
-    BRONZE_PATH = os.environ["BRONZE_PATH"]  # s3a://datalake/bronze/router_metrics
-
+    BRONZE_PATH = os.environ["BRONZE_PATH"]
     PG_HOST = os.environ["PG_HOST"]
-    PG_DB   = os.environ["PG_DB"]
+    PG_DB = os.environ["PG_DB"]
     PG_USER = os.environ["PG_USER"]
     PG_PASS = os.environ["PG_PASS"]
     PG_PORT = int(os.environ.get("PG_PORT", "5432"))
 
-    CHECKPOINT = os.environ.get("GOLD_CHECKPOINT", "s3a://datalake/checkpoints/gold_to_postgres_v1")
+    CHECKPOINT = os.environ.get(
+        "GOLD_CHECKPOINT",
+        "s3a://datalake/checkpoints/gold_to_postgres_v1"
+    )
 
     spark = SparkSession.builder.appName("gold-to-postgres").getOrCreate()
     spark.sparkContext.setLogLevel("INFO")
@@ -38,22 +37,26 @@ data:
     print("CHECKPOINT:", CHECKPOINT, flush=True)
 
     def pg_conn():
-      return psycopg2.connect(host=PG_HOST, port=PG_PORT, dbname=PG_DB, user=PG_USER, password=PG_PASS)
+        return pg8000.connect(
+            host=PG_HOST,
+            port=PG_PORT,
+            database=PG_DB,
+            user=PG_USER,
+            password=PG_PASS,
+        )
 
     def upsert_device_hourly(rows):
-      if not rows:
-        return
-      conn = pg_conn()
-      conn.autocommit = True
-      with conn.cursor() as cur:
+        if not rows:
+            return
+
         sql = """
         INSERT INTO gold_device_hourly (
           hour_ts, device_id, event_count,
           cpu_avg, cpu_p95, mem_avg, mem_p95,
-          interface_errors_total,
-          packets_in_sum, packets_out_sum,
-          health_score
-        ) VALUES %s
+          packet_loss_avg, packet_loss_p95,
+          throughput_in_avg_mbps, throughput_out_avg_mbps,
+          degraded_events, bgp_down_events
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (hour_ts, device_id)
         DO UPDATE SET
           event_count = EXCLUDED.event_count,
@@ -61,27 +64,34 @@ data:
           cpu_p95 = EXCLUDED.cpu_p95,
           mem_avg = EXCLUDED.mem_avg,
           mem_p95 = EXCLUDED.mem_p95,
-          interface_errors_total = EXCLUDED.interface_errors_total,
-          packets_in_sum = EXCLUDED.packets_in_sum,
-          packets_out_sum = EXCLUDED.packets_out_sum,
-          health_score = EXCLUDED.health_score,
+          packet_loss_avg = EXCLUDED.packet_loss_avg,
+          packet_loss_p95 = EXCLUDED.packet_loss_p95,
+          throughput_in_avg_mbps = EXCLUDED.throughput_in_avg_mbps,
+          throughput_out_avg_mbps = EXCLUDED.throughput_out_avg_mbps,
+          degraded_events = EXCLUDED.degraded_events,
+          bgp_down_events = EXCLUDED.bgp_down_events,
           updated_at = now();
         """
-        execute_values(cur, sql, rows, page_size=1000)
-      conn.close()
+
+        conn = pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.executemany(sql, rows)
+            conn.commit()
+        finally:
+            conn.close()
 
     def upsert_fleet_hourly(rows):
-      if not rows:
-        return
-      conn = pg_conn()
-      conn.autocommit = True
-      with conn.cursor() as cur:
+        if not rows:
+            return
+
         sql = """
         INSERT INTO gold_fleet_hourly (
           hour_ts, event_count, devices_reporting,
           cpu_avg, cpu_p95, mem_avg, mem_p95,
-          interface_errors_total, devices_with_errors
-        ) VALUES %s
+          packet_loss_avg, packet_loss_p95,
+          devices_degraded, bgp_down_devices
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (hour_ts)
         DO UPDATE SET
           event_count = EXCLUDED.event_count,
@@ -90,107 +100,117 @@ data:
           cpu_p95 = EXCLUDED.cpu_p95,
           mem_avg = EXCLUDED.mem_avg,
           mem_p95 = EXCLUDED.mem_p95,
-          interface_errors_total = EXCLUDED.interface_errors_total,
-          devices_with_errors = EXCLUDED.devices_with_errors,
+          packet_loss_avg = EXCLUDED.packet_loss_avg,
+          packet_loss_p95 = EXCLUDED.packet_loss_p95,
+          devices_degraded = EXCLUDED.devices_degraded,
+          bgp_down_devices = EXCLUDED.bgp_down_devices,
           updated_at = now();
         """
-        execute_values(cur, sql, rows, page_size=200)
-      conn.close()
+
+        conn = pg_conn()
+        try:
+            cur = conn.cursor()
+            cur.executemany(sql, rows)
+            conn.commit()
+        finally:
+            conn.close()
 
     def foreach_batch(batch_df, batch_id: int):
-      if batch_df.rdd.isEmpty():
-        print(f"Batch {batch_id}: empty", flush=True)
-        return
+        if batch_df.rdd.isEmpty():
+            print(f"Batch {batch_id}: empty", flush=True)
+            return
 
-      df = batch_df.where(col("ts").isNotNull()).where(col("device_id").isNotNull())
-
-      # Device-hour
-      device_hourly = (
-        df.groupBy(window(col("ts"), "1 hour").alias("w"), col("device_id"))
-          .agg(
-            Fcount(lit(1)).alias("event_count"),
-            avg(col("cpu_usage")).alias("cpu_avg"),
-            expr("percentile_approx(cpu_usage, 0.95)").alias("cpu_p95"),
-            avg(col("memory_usage")).alias("mem_avg"),
-            expr("percentile_approx(memory_usage, 0.95)").alias("mem_p95"),
-            Fsum(col("interface_errors")).alias("interface_errors_total"),
-            Fsum(col("packets_in")).alias("packets_in_sum"),
-            Fsum(col("packets_out")).alias("packets_out_sum"),
-          )
-          .withColumn("hour_ts", col("w").getField("start"))
-          .drop("w")
-      )
-
-      # Health score (simple & explainable for dashboards)
-      # Penalize high p95 CPU, high p95 memory, and interface errors.
-      scored = device_hourly.withColumn(
-        "health_score",
-        expr("""
-          greatest(0,
-            100
-            - cast(coalesce(cpu_p95,0)/2 as int)
-            - cast(coalesce(mem_p95,0)/2 as int)
-            - least(50, cast(coalesce(interface_errors_total,0) as int))
-          )
-        """)
-      )
-
-      # Fleet-hour
-      fleet_hourly = (
-        df.groupBy(window(col("ts"), "1 hour").alias("w"))
-          .agg(
-            Fcount(lit(1)).alias("event_count"),
-            expr("count(distinct device_id)").alias("devices_reporting"),
-            avg(col("cpu_usage")).alias("cpu_avg"),
-            expr("percentile_approx(cpu_usage, 0.95)").alias("cpu_p95"),
-            avg(col("memory_usage")).alias("mem_avg"),
-            expr("percentile_approx(memory_usage, 0.95)").alias("mem_p95"),
-            Fsum(col("interface_errors")).alias("interface_errors_total"),
-            expr("count(distinct case when interface_errors > 0 then device_id end)").alias("devices_with_errors")
-          )
-          .withColumn("hour_ts", col("w").getField("start"))
-          .drop("w")
-      )
-
-      device_rows = [
-        (
-          r["hour_ts"], r["device_id"], int(r["event_count"]),
-          float(r["cpu_avg"] or 0), float(r["cpu_p95"] or 0),
-          float(r["mem_avg"] or 0), float(r["mem_p95"] or 0),
-          int(r["interface_errors_total"] or 0),
-          int(r["packets_in_sum"] or 0), int(r["packets_out_sum"] or 0),
-          int(r["health_score"] or 0),
+        df = (
+            batch_df
+            .where(col("event_ts").isNotNull())
+            .where(col("device_id").isNotNull())
         )
-        for r in scored.select(
-          "hour_ts","device_id","event_count","cpu_avg","cpu_p95","mem_avg","mem_p95",
-          "interface_errors_total","packets_in_sum","packets_out_sum","health_score"
-        ).collect()
-      ]
 
-      fleet_rows = [
-        (
-          r["hour_ts"], int(r["event_count"]), int(r["devices_reporting"]),
-          float(r["cpu_avg"] or 0), float(r["cpu_p95"] or 0),
-          float(r["mem_avg"] or 0), float(r["mem_p95"] or 0),
-          int(r["interface_errors_total"] or 0), int(r["devices_with_errors"] or 0),
+        device_hourly = (
+            df.groupBy(window(col("event_ts"), "1 hour").alias("w"), col("device_id"))
+              .agg(
+                  Fcount(lit(1)).alias("event_count"),
+                  avg(col("cpu_usage_pct")).alias("cpu_avg"),
+                  expr("percentile_approx(cpu_usage_pct, 0.95)").alias("cpu_p95"),
+                  avg(col("memory_usage_pct")).alias("mem_avg"),
+                  expr("percentile_approx(memory_usage_pct, 0.95)").alias("mem_p95"),
+                  avg(col("packet_loss_pct")).alias("packet_loss_avg"),
+                  expr("percentile_approx(packet_loss_pct, 0.95)").alias("packet_loss_p95"),
+                  avg(col("throughput_in_mbps")).alias("throughput_in_avg_mbps"),
+                  avg(col("throughput_out_mbps")).alias("throughput_out_avg_mbps"),
+                  Fsum(when(col("health") == "degraded", 1).otherwise(0)).alias("degraded_events"),
+                  Fsum(when(col("bgp_state") != "up", 1).otherwise(0)).alias("bgp_down_events"),
+              )
+              .withColumn("hour_ts", col("w").getField("start"))
+              .drop("w")
         )
-        for r in fleet_hourly.collect()
-      ]
 
-      upsert_device_hourly(device_rows)
-      upsert_fleet_hourly(fleet_rows)
+        fleet_hourly = (
+            df.groupBy(window(col("event_ts"), "1 hour").alias("w"))
+              .agg(
+                  Fcount(lit(1)).alias("event_count"),
+                  expr("count(distinct device_id)").alias("devices_reporting"),
+                  avg(col("cpu_usage_pct")).alias("cpu_avg"),
+                  expr("percentile_approx(cpu_usage_pct, 0.95)").alias("cpu_p95"),
+                  avg(col("memory_usage_pct")).alias("mem_avg"),
+                  expr("percentile_approx(memory_usage_pct, 0.95)").alias("mem_p95"),
+                  avg(col("packet_loss_pct")).alias("packet_loss_avg"),
+                  expr("percentile_approx(packet_loss_pct, 0.95)").alias("packet_loss_p95"),
+                  expr("count(distinct case when health = 'degraded' then device_id end)").alias("devices_degraded"),
+                  expr("count(distinct case when bgp_state != 'up' then device_id end)").alias("bgp_down_devices"),
+              )
+              .withColumn("hour_ts", col("w").getField("start"))
+              .drop("w")
+        )
 
-      print(f"Batch {batch_id}: upserted device_rows={len(device_rows)} fleet_rows={len(fleet_rows)}", flush=True)
+        device_rows = [
+            (
+                r["hour_ts"], r["device_id"], int(r["event_count"]),
+                float(r["cpu_avg"] or 0), float(r["cpu_p95"] or 0),
+                float(r["mem_avg"] or 0), float(r["mem_p95"] or 0),
+                float(r["packet_loss_avg"] or 0), float(r["packet_loss_p95"] or 0),
+                float(r["throughput_in_avg_mbps"] or 0), float(r["throughput_out_avg_mbps"] or 0),
+                int(r["degraded_events"] or 0), int(r["bgp_down_events"] or 0),
+            )
+            for r in device_hourly.collect()
+        ]
 
-    bronze = spark.readStream.format("parquet").load(BRONZE_PATH)
+        fleet_rows = [
+            (
+                r["hour_ts"], int(r["event_count"]), int(r["devices_reporting"]),
+                float(r["cpu_avg"] or 0), float(r["cpu_p95"] or 0),
+                float(r["mem_avg"] or 0), float(r["mem_p95"] or 0),
+                float(r["packet_loss_avg"] or 0), float(r["packet_loss_p95"] or 0),
+                int(r["devices_degraded"] or 0), int(r["bgp_down_devices"] or 0),
+            )
+            for r in fleet_hourly.collect()
+        ]
 
-    q = (
-      bronze.writeStream
-            .foreachBatch(foreach_batch)
-            .option("checkpointLocation", CHECKPOINT)
-            .trigger(processingTime="60 seconds")
-            .start()
+        upsert_device_hourly(device_rows)
+        upsert_fleet_hourly(fleet_rows)
+
+        print(
+            f"Batch {batch_id}: upserted device_rows={len(device_rows)} fleet_rows={len(fleet_rows)}",
+            flush=True
+        )
+
+    static_df = spark.read.format("parquet").load(BRONZE_PATH)
+    bronze_schema = static_df.schema
+
+    bronze = (
+        spark.readStream
+             .format("parquet")
+             .schema(bronze_schema)
+             .load(BRONZE_PATH)
     )
 
-    print("STREAM STARTED", q.id, q.runId, flush=True)
-    q.awaitTermination()
+    query = (
+        bronze.writeStream
+              .foreachBatch(foreach_batch)
+              .option("checkpointLocation", CHECKPOINT)
+              .trigger(processingTime="60 seconds")
+              .start()
+    )
+
+    print("STREAM STARTED", query.id, query.runId, flush=True)
+    query.awaitTermination()
