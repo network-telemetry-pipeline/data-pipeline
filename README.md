@@ -66,6 +66,8 @@ data-pipeline/
 | `spark-gold` | `spark/gold/` | `spark` |
 | `dashboard-api` | `dashboard-api/` | `api` |
 
+![ArgoCD](assets/argocd.png)
+
 Apply ArgoCD apps manually once (or via infra repo):
 
 ```bash
