@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: telemetry-api
+  namespace: api
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+spec:
+  selector:
+    app: telemetry-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+  type: ClusterIP

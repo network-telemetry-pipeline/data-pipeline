@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: telemetry-api
+  namespace: api
+  annotations:
+    argocd.argoproj.io/sync-wave: "3"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - ccmllab.mooo.com
+      secretName: telemetry-api-tls
+  rules:
+    - host: ccmllab.mooo.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: telemetry-api
+                port:
+                  number: 80
