@@ -24,6 +24,9 @@ rules:
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "delete", "patch", "update", "deletecollection"]
   - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch", "update", "deletecollection"]
+  - apiGroups: [""]
     resources: ["events"]
     verbs: ["get", "list", "watch", "create", "delete", "patch", "update", "deletecollection"]
 ---
